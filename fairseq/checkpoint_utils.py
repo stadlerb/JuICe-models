@@ -128,6 +128,12 @@ def load_checkpoint_to_cpu(path):
     state = _upgrade_state_dict(state)
     return state
 
+def get_checkpoint_epoch(filenames):
+    filename = filenames[0]
+    if not os.path.exists(filename):
+        raise IOError('Model file not found: {}'.format(filename))
+    state = load_checkpoint_to_cpu(filename)
+    return state['extra_state']['train_iterator']['epoch']
 
 def load_model_ensemble(filenames, arg_overrides=None, task=None):
     """Loads an ensemble of models.
@@ -154,6 +160,10 @@ def load_model_ensemble(filenames, arg_overrides=None, task=None):
 
         # build model for ensemble
         model = task.build_model(args)
+        print('Loading model from epoch...')
+        print(state['extra_state']['train_iterator']['epoch'])
+        import time;time.sleep(3)
+
         model.load_state_dict(state['model'], strict=True)
         ensemble.append(model)
 

@@ -74,22 +74,57 @@ def main(args, init_distributed=False):
     train_meter = StopwatchMeter()
     train_meter.start()
     valid_losses = [None]
+    valid_losses_per_epoch = []
     valid_subsets = args.valid_subset.split(',')
     while lr > args.min_lr and epoch_itr.epoch < max_epoch and trainer.get_num_updates() < max_update:
+        print('='*41)
         # train for one epoch
         train(args, trainer, task, epoch_itr)
 
         if not args.disable_validation and epoch_itr.epoch % args.validate_interval == 0:
             valid_losses = validate(args, trainer, task, epoch_itr, valid_subsets)
+            valid_losses_per_epoch.append(valid_losses[0])
+            print(f'| Best valid loss of {min(valid_losses_per_epoch)} at epoch {valid_losses_per_epoch.index(min(valid_losses_per_epoch))}')
+
+
         else:
             valid_losses = [None]
 
         # only use first validation loss to update the learning rate
         lr = trainer.lr_step(epoch_itr.epoch, valid_losses[0])
+        print(f'| lr {lr}')
 
         # save checkpoint
         if epoch_itr.epoch % args.save_interval == 0:
             checkpoint_utils.save_checkpoint(args, trainer, epoch_itr, valid_losses[0])
+
+        # important: we need to check if master since that process will checkpoint the model, and
+        # if another process runs the generation, its duplicated work and it may try to read the
+        # checkpoint while it's being created by master and crash.
+        if distributed_utils.is_master(args):
+            # also generate infrequently since slow
+            if epoch_itr.epoch < 3 or epoch_itr.epoch % 10 == 0:
+                print('______________________ Generating')
+                # run generate here
+                import sys
+                import generate_jupyter
+                temp_args = f'''{args.data}
+                 --path {args.data}/checkpoint{epoch_itr.epoch}.pt
+                 --max-tokens 10000
+                 --beam 1 --remove-bpe --gen-subset valid
+                 --task context_code
+                 --max-seq-len {args.max_seq_len}
+                 --skip-invalid-size-inputs-valid-test
+                 --quiet
+                 '''
+                sys.argv[1:] = temp_args.split()
+                # print(sys.argv)
+                # try:
+                bleu, em = generate_jupyter.cli_main()
+                # except:
+                #     print('generation failed, due to concurrency, as another process'
+                #           'may have been still writing into checkpoint last?')
+                # # print(bleu, em)
 
         if ':' in getattr(args, 'data', ''):
             # sharded data: get train iterator for next epoch
@@ -103,6 +138,7 @@ def train(args, trainer, task, epoch_itr):
     # Update parameters every N batches
     update_freq = args.update_freq[epoch_itr.epoch - 1] \
         if epoch_itr.epoch <= len(args.update_freq) else args.update_freq[-1]
+
 
     # Initialize data iterator
     itr = epoch_itr.next_epoch_itr(
@@ -118,6 +154,9 @@ def train(args, trainer, task, epoch_itr):
     valid_subsets = args.valid_subset.split(',')
     max_update = args.max_update or math.inf
     for i, samples in enumerate(progress, start=epoch_itr.iterations_in_epoch):
+        # print('============')
+        # print(i, samples[0]['nsentences'])
+        # print(i, samples)
         log_output = trainer.train_step(samples)
         if log_output is None:
             continue
@@ -147,6 +186,7 @@ def train(args, trainer, task, epoch_itr):
         ):
             valid_losses = validate(args, trainer, task, epoch_itr, valid_subsets)
             checkpoint_utils.save_checkpoint(args, trainer, epoch_itr, valid_losses[0])
+
 
         if num_updates >= max_update:
             break

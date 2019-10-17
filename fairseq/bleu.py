@@ -7,6 +7,9 @@
 
 import ctypes
 import math
+
+from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction, corpus_bleu
+import pandas as pd
 import torch
 
 try:
@@ -59,6 +62,141 @@ class SacrebleuScorer(object):
             raise NotImplementedError
         return self.sacrebleu.corpus_bleu(self.sys, [self.ref])
 
+class Metric():
+    '''This class computes bleu and em on generated code.'''
+    def __init__(self):
+        self.target_key = 'targ'
+        self.pred_key = 'pred'
+        self.targs = []
+        self.preds = []
+        columns = ['bleu', 'em', 'corpus_bleu']
+        columns.append('epoch')
+        self.metrics_per_epoch = pd.DataFrame(columns=columns)
+
+    def compute_corpus_bleu(self, targs, preds):
+        references = [[t[self.target_key]] for t in targs]
+        hypothesis = [p[self.pred_key] for p in preds]
+        sm = SmoothingFunction()
+        return corpus_bleu(references, hypothesis, smoothing_function=sm.method3) * 100
+
+    def compute_bleu(self, test, preds):
+        def get_bleu(targ, pred):
+            # This is how Ling et al. compute bleu score.
+            sm = SmoothingFunction()
+            ngram_weights = [0.25] * min(4, len(targ))
+            return sentence_bleu([targ], pred,
+                                 weights=ngram_weights, smoothing_function=sm.method3)
+        bleus = []
+        for targ, pred in zip(test, preds):
+            bleus.append(get_bleu(targ[self.target_key], pred[self.pred_key]))
+        return self.avg(bleus)
+        # return sum(bleus)/len(bleus)
+
+    def compute_em(self, test, preds):
+        ems = []
+        for targ, pred in zip(test, preds):
+            ems.append(targ[self.target_key] == pred[self.pred_key])
+        return self.avg(ems)
+        # return sum(ems)/len(ems)
+
+    @staticmethod
+    def avg(lst):
+        return sum(lst)/len(lst) * 100
+
+    def compute_metrics_helper(self, test, preds, epoch):
+        if len(test) != preds:
+            # if trunc param was passed preds will be shorter so we truncate.
+            test = test[:len(preds)]
+
+        metrics_dict = {'epoch': [epoch]}
+
+        metrics_dict['bleu'] = self.compute_bleu(test, preds)
+        metrics_dict['em'] = self.compute_em(test, preds)
+        metrics_dict['corpus_bleu'] = self.compute_corpus_bleu(test, preds)
+
+
+        # we need to pass index since values are scalars and not lists
+        t = pd.DataFrame(metrics_dict, index=[0])
+
+        self.metrics_per_epoch = self.metrics_per_epoch.append(t, ignore_index=True, sort=False)
+        self.metrics_per_epoch = self.metrics_per_epoch.apply(pd.to_numeric)
+
+
+    def add_string(self, ref, pred):
+        self.targs.append(ref)
+        self.preds.append(pred)
+
+    def compute_metrics(self, epoch):
+        '''Computes bleu em on all targ/pred and stores the values.'''
+        self.compute_metrics_helper([{self.target_key: t.split()} for t in self.targs],
+                                    [{self.pred_key: p.split()} for p in self.preds], epoch)
+
+    def get_metric(self, name):
+        for col_name in self.metrics_per_epoch.columns.values:
+            if col_name == name:
+                return self.metrics_per_epoch[col_name]
+
+    def result_string(self):
+        return self.metrics_string()
+
+    def print_best_string(self):
+        '''This is more useful for multi epoch printing where max value for each
+        needs to be computed.'''
+        print('Best metrics...')
+        # print(self.metrics_per_epoch.dtypes)
+        lst = []
+        for col_name in self.metrics_per_epoch.columns.values:
+            if col_name == 'epoch':
+                continue
+            # print(col_name)
+            # print(self.metrics_per_epoch)
+            max_idx = self.metrics_per_epoch.idxmax(axis=0)
+            # print('___________')
+            # print(max_idx)
+            row = self.metrics_per_epoch.iloc[max_idx[col_name]]
+            lst.append((col_name, f'{row[col_name]:.4f}', row.epoch))
+            # print(f'Best {col_name}: {row[col_name]:.2f}, Epoch {row.epoch}')
+        print(pd.DataFrame(lst, columns=['metric', 'max', 'epoch']).T)
+
+    def metrics_string(self):
+        # print(self.metrics_per_epoch)
+        return str(pd.DataFrame(self.metrics_per_epoch.iloc[-1]).T)
+
+    def save(self, filename):
+        self.metrics_per_epoch.to_json(filename, orient='records')
+
+
+
+class EmScorer(object):
+    def __init__(self):
+        self.reset()
+
+    def reset(self, one_init=False):
+        if one_init:
+            raise NotImplementedError
+        self.ref = []
+        self.sys = []
+
+    def add_string(self, ref, pred):
+        self.ref.append(ref)
+        self.sys.append(pred)
+
+    def score(self, order=4):
+        raise NotImplementedError
+        # return self.result_string(order).score
+
+    def result_string(self):
+        correct = 0
+        for ref, pred in zip(self.ref, self.sys):
+            if ref == pred:
+                # print('correct')
+                # print(ref)
+                # print(pred)
+                correct += 1
+        return (correct / len(self.ref)) * 100
+        # if order != 4:
+        #     raise NotImplementedError
+        # return self.sacrebleu.corpus_bleu(self.sys, [self.ref])
 
 class Scorer(object):
     def __init__(self, pad, eos, unk):
